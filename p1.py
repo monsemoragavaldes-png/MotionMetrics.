@@ -996,83 +996,179 @@ target_fps = st.select_slider(
     "Frecuencia de análisis (FPS)", options=[10, 15, 30], value=10
 )
 st.caption(
-    f"Para mayor estabilidad en la nube: máximo {MAX_DURATION_SEC} s y {MAX_VIDEO_MB} MB. "
+    f"Para mayor estabilidad en la nube: máximo {MAX_DURATION_SEC} s y {MAX_VIDEO_MB} MB por video. "
     "Se recomienda MP4/H.264, 720p y movimientos lentos."
 )
-uploaded_file = st.file_uploader("Sube el video del paciente", type=["mp4", "mov", "avi"])
+
+st.header("2. Qué quieres evaluar")
+mode = st.radio("Modo de evaluación", [MODE_AUTO, MODE_SEGMENTS], horizontal=True)
 preview_placeholder = st.empty()
 
-if uploaded_file is not None:
-    file_size_mb = uploaded_file.size / (1024 * 1024)
+
+def _save_uploaded_temp(uploaded, suffix=".mp4"):
+    """Guarda un UploadedFile en disco temporal y devuelve ruta + metadatos."""
+    file_size_mb = uploaded.size / (1024 * 1024)
     if file_size_mb > MAX_VIDEO_MB:
-        st.error(
-            f"El video pesa {file_size_mb:.1f} MB. Para esta versión en la nube, "
-            f"utiliza un archivo de máximo {MAX_VIDEO_MB} MB."
+        return None, None, None, (
+            f"{uploaded.name}: pesa {file_size_mb:.1f} MB. "
+            f"El máximo permitido para esta versión es {MAX_VIDEO_MB} MB."
         )
-        st.stop()
 
-    file_id = f"{uploaded_file.name}-{uploaded_file.size}"
+    ext = os.path.splitext(uploaded.name)[1].lower() or suffix
+    uploaded.seek(0)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+        tmp.write(uploaded.read())
+        path = tmp.name
 
-    # Solo se escribe/lee el video cuando cambia el archivo (no en cada rerun)
-    if st.session_state.file_id != file_id:
-        old_path = st.session_state.get("tmp_path")
-        if old_path:
-            try:
-                os.remove(old_path)
-            except Exception:
-                pass
-        old_processed = st.session_state.get("processed_video_path")
-        if old_processed:
-            try:
-                os.remove(old_processed)
-            except Exception:
-                pass
-            st.session_state.pop("processed_video_path", None)
+    cap = cv2.VideoCapture(path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps_raw = cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
 
-        uploaded_file.seek(0)
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-            tmp.write(uploaded_file.read())
-            st.session_state.tmp_path = tmp.name
+    fps_known = bool(fps_raw and fps_raw > 0)
+    duration = total_frames / (fps_raw if fps_known else FALLBACK_FPS) if total_frames > 0 else 0.0
 
-        cap_temp = cv2.VideoCapture(st.session_state.tmp_path)
-        total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps_raw = cap_temp.get(cv2.CAP_PROP_FPS)
-        cap_temp.release()
-
-        st.session_state.fps_known = bool(fps_raw and fps_raw > 0)
-        st.session_state.duration = total_frames / (fps_raw if st.session_state.fps_known else FALLBACK_FPS)
-        st.session_state.file_id = file_id
-        st.session_state.results = []
-        st.session_state.protocol_df = make_protocol_df([("hombro", "flexion")], "Derecho", st.session_state.duration)
-        st.session_state.editor_version += 1
-
-    duration = st.session_state.duration
-    tmp_path = st.session_state.tmp_path
-
-    if not st.session_state.fps_known:
-        st.warning(
-            "No fue posible determinar los FPS del video. El ROM puede analizarse, "
-            "pero la velocidad angular no será informada."
-        )
+    if duration <= 0:
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return None, None, None, f"{uploaded.name}: no fue posible leer el video."
 
     if duration > MAX_DURATION_SEC:
-        st.error(
-            f"El video dura {duration:.1f} segundos. Para esta versión en la nube, "
-            f"utiliza videos de máximo {MAX_DURATION_SEC} segundos."
+        try:
+            os.remove(path)
+        except Exception:
+            pass
+        return None, None, None, (
+            f"{uploaded.name}: dura {duration:.1f} s. "
+            f"El máximo permitido es {MAX_DURATION_SEC} s."
         )
-        st.stop()
 
-    with st.expander("Ver video original"):
-        st.video(tmp_path)
-    st.caption(f"Duración del video: {duration:.1f} s")
+    return path, duration, fps_known, None
 
-    st.header("2. Qué quieres evaluar")
-    mode = st.radio("Modo de evaluación", [MODE_AUTO, MODE_SEGMENTS], horizontal=True)
 
-    # ==================================================================
-    # MODO AUTOMÁTICO
-    # ==================================================================
-    if mode == MODE_AUTO:
+def store_batch_results(results, video_paths):
+    """Guarda resultados de varios videos procesados en el modo Por tramos."""
+    valid_any = any(r.get("valid", 0) > 0 for r in results)
+    if not valid_any:
+        st.session_state.results = []
+        for p in video_paths:
+            try:
+                if p and os.path.exists(p):
+                    os.remove(p)
+            except Exception:
+                pass
+        st.error(
+            "No hubo frames con confianza suficiente en los videos procesados. "
+            "Revisa iluminación, encuadre y visibilidad de las articulaciones."
+        )
+        return
+
+    for old in st.session_state.get("processed_video_paths", []):
+        try:
+            if old and os.path.exists(old):
+                os.remove(old)
+        except Exception:
+            pass
+
+    old_single = st.session_state.get("processed_video_path")
+    if old_single:
+        try:
+            if os.path.exists(old_single):
+                os.remove(old_single)
+        except Exception:
+            pass
+        st.session_state.pop("processed_video_path", None)
+
+    st.session_state.results = results
+    st.session_state.processed_video_paths = video_paths
+    st.success(f"✅ Procesamiento completado: {len(video_paths)} video(s).")
+
+
+# ======================================================================
+# MODO AUTOMÁTICO: UN VIDEO
+# ======================================================================
+if mode == MODE_AUTO:
+    uploaded_file = st.file_uploader(
+        "Sube el video del paciente",
+        type=["mp4", "mov", "avi"],
+        key="auto_video_uploader",
+    )
+
+    if uploaded_file is not None:
+        file_size_mb = uploaded_file.size / (1024 * 1024)
+        if file_size_mb > MAX_VIDEO_MB:
+            st.error(
+                f"El video pesa {file_size_mb:.1f} MB. Para esta versión en la nube, "
+                f"utiliza un archivo de máximo {MAX_VIDEO_MB} MB."
+            )
+            st.stop()
+
+        file_id = f"{uploaded_file.name}-{uploaded_file.size}"
+
+        if st.session_state.file_id != file_id:
+            old_path = st.session_state.get("tmp_path")
+            if old_path:
+                try:
+                    os.remove(old_path)
+                except Exception:
+                    pass
+
+            old_processed = st.session_state.get("processed_video_path")
+            if old_processed:
+                try:
+                    os.remove(old_processed)
+                except Exception:
+                    pass
+                st.session_state.pop("processed_video_path", None)
+
+            for old in st.session_state.get("processed_video_paths", []):
+                try:
+                    if old and os.path.exists(old):
+                        os.remove(old)
+                except Exception:
+                    pass
+            st.session_state.pop("processed_video_paths", None)
+
+            uploaded_file.seek(0)
+            ext = os.path.splitext(uploaded_file.name)[1].lower() or ".mp4"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
+                tmp.write(uploaded_file.read())
+                st.session_state.tmp_path = tmp.name
+
+            cap_temp = cv2.VideoCapture(st.session_state.tmp_path)
+            total_frames = int(cap_temp.get(cv2.CAP_PROP_FRAME_COUNT))
+            fps_raw = cap_temp.get(cv2.CAP_PROP_FPS)
+            cap_temp.release()
+
+            st.session_state.fps_known = bool(fps_raw and fps_raw > 0)
+            st.session_state.duration = total_frames / (
+                fps_raw if st.session_state.fps_known else FALLBACK_FPS
+            )
+            st.session_state.file_id = file_id
+            st.session_state.results = []
+
+        duration = st.session_state.duration
+        tmp_path = st.session_state.tmp_path
+
+        if not st.session_state.fps_known:
+            st.warning(
+                "No fue posible determinar los FPS del video. El ROM puede analizarse, "
+                "pero la velocidad angular no será informada."
+            )
+
+        if duration > MAX_DURATION_SEC:
+            st.error(
+                f"El video dura {duration:.1f} segundos. Para esta versión en la nube, "
+                f"utiliza videos de máximo {MAX_DURATION_SEC} segundos."
+            )
+            st.stop()
+
+        with st.expander("Ver video original"):
+            st.video(tmp_path)
+        st.caption(f"Duración del video: {duration:.1f} s")
+
         st.write(
             "Elige las articulaciones y los movimientos. La app separa cada movimiento por la "
             "dirección del ángulo y por la vista de cámara, sin que tengas que indicar tiempos."
@@ -1098,91 +1194,227 @@ if uploaded_file is not None:
         view_mode = VIEW_MODES[view_choice]
 
         start_sec, end_sec = st.slider(
-            "Recorte del video (opcional)", 0.0, float(duration), (0.0, float(duration)), step=0.1
+            "Recorte del video (opcional)",
+            0.0,
+            float(duration),
+            (0.0, float(duration)),
+            step=0.1,
         )
 
         needed_views = sorted({AUTO_MOVEMENTS[(bp, m)][0] for bp in selection for m in selection[bp]})
         if view_mode == "auto" and len(needed_views) > 1:
             st.info(
                 "Cada movimiento se mide solo en los frames donde la cámara ve la vista adecuada: "
-                "**lateral** (de perfil) para flexión/extensión y **frontal** para abducción/aducción. "
-                "El paciente debe girarse hacia la posición correcta para cada grupo de movimientos."
+                "**lateral** para flexión/extensión y **frontal** para abducción/aducción."
             )
         elif view_mode in ("lateral", "frontal"):
-            missing = [movement_label(bp, m) for bp in selection for m in selection[bp]
-                       if AUTO_MOVEMENTS[(bp, m)][0] != view_mode]
+            missing = [
+                movement_label(bp, m)
+                for bp in selection
+                for m in selection[bp]
+                if AUTO_MOVEMENTS[(bp, m)][0] != view_mode
+            ]
             if missing:
                 st.warning(
                     f"Con la vista fija en {view_mode}, estos movimientos no se podrán medir: "
                     + ", ".join(missing)
                 )
-        st.caption("Muñeca y rotaciones de hombro/cadera no están en este modo: usa el modo «Por tramos».")
 
-        if st.button("Procesar evaluación", disabled=not selection):
+        st.caption(
+            "Muñeca y rotaciones de hombro/cadera no están en este modo: "
+            "usa el modo «Por tramos / múltiples videos»."
+        )
+
+        if st.button("Procesar evaluación", disabled=not selection, key="process_auto"):
             sides = ["left", "right"] if side_choice == "Ambos" else [SIDE_LABELS[side_choice]]
             groups = build_auto_groups(selection, sides)
             with st.spinner("Procesando cinemática y velocidad angular..."):
                 processed_video_path, meta = process_video_auto(
-                    tmp_path, groups, target_fps, preview_placeholder, start_sec, end_sec, view_mode
+                    tmp_path,
+                    groups,
+                    target_fps,
+                    preview_placeholder,
+                    start_sec,
+                    end_sec,
+                    view_mode,
                 )
                 results = summarize_auto(groups, meta["sample_period"], start_sec, end_sec)
             store_results(results, processed_video_path)
 
-    # ==================================================================
-    # MODO POR TRAMOS
-    # ==================================================================
-    else:
-        st.write(
-            "Define en qué segundo empieza y termina cada movimiento. "
-            "Puedes agregar filas, borrarlas o cargar el protocolo completo de tren superior."
-        )
+# ======================================================================
+# MODO POR TRAMOS / MÚLTIPLES VIDEOS
+# Cada video puede corresponder a un movimiento diferente.
+# ======================================================================
+else:
+    st.write(
+        "Sube uno o varios videos. Para cada archivo selecciona qué movimiento se está evaluando, "
+        "el lado corporal y, si lo necesitas, recorta el intervalo que contiene el movimiento."
+    )
 
-        cpre1, cpre2, cpre3 = st.columns([2, 2, 1])
-        preset_side = cpre1.selectbox("Lado del protocolo", list(SIDE_LABELS.keys()), index=1)
-        if cpre2.button("Cargar protocolo de tren superior"):
-            st.session_state.protocol_df = make_protocol_df(UPPER_LIMB_PROTOCOL, preset_side, duration)
-            st.session_state.editor_version += 1
-            st.rerun()
-        if cpre3.button("Limpiar"):
-            st.session_state.protocol_df = make_protocol_df([], preset_side, duration).iloc[0:0]
-            st.session_state.editor_version += 1
-            st.rerun()
+    uploaded_files = st.file_uploader(
+        "Sube los videos de la evaluación",
+        type=["mp4", "mov", "avi"],
+        accept_multiple_files=True,
+        key="segments_multi_uploader",
+    )
 
-        st.caption(
-            "El protocolo de tren superior reparte los tiempos en partes iguales: "
-            "ajusta Inicio y Fin de cada fila según tu video."
-        )
+    if uploaded_files:
+        st.caption(f"Videos cargados: {len(uploaded_files)}")
+        configs = []
+        config_errors = []
 
-        edited_df = st.data_editor(
-            st.session_state.protocol_df,
-            key=f"protocol_editor_{st.session_state.editor_version}",
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                COL_MOV: st.column_config.SelectboxColumn(COL_MOV, options=list(MOVE_LABEL_TO_KEY.keys()), required=True, width="medium"),
-                COL_SIDE: st.column_config.SelectboxColumn(COL_SIDE, options=list(SIDE_LABELS.keys()), required=True),
-                COL_START: st.column_config.NumberColumn(COL_START, min_value=0.0, step=0.1, format="%.1f"),
-                COL_END: st.column_config.NumberColumn(COL_END, min_value=0.0, step=0.1, format="%.1f"),
-            },
-        )
+        for i, uf in enumerate(uploaded_files):
+            with st.container(border=True):
+                st.markdown(f"**Video {i + 1}: {uf.name}**")
 
-        segments, errors = parse_protocol(edited_df, duration)
-        for err in errors:
-            st.error(err)
+                # Guardado temporal persistente por archivo dentro de esta sesión
+                cache_key = f"segment_file_{i}_{uf.name}_{uf.size}"
+                if cache_key not in st.session_state:
+                    path, dur, fps_known, err = _save_uploaded_temp(uf)
+                    if err:
+                        st.session_state[cache_key] = {"error": err}
+                    else:
+                        st.session_state[cache_key] = {
+                            "path": path,
+                            "duration": dur,
+                            "fps_known": fps_known,
+                        }
 
-        views_needed = sorted({seg["mov"]["view"] for seg in segments})
-        if len(views_needed) > 1:
-            st.info(
-                "Este protocolo mezcla movimientos de vista **lateral** y **frontal**. Con una sola cámara "
-                "fija, el paciente debe girar (de frente a de perfil) entre los tramos correspondientes, "
-                "y cada tramo debe comenzar cuando ya esté en la posición correcta."
-            )
+                info = st.session_state[cache_key]
+                if info.get("error"):
+                    st.error(info["error"])
+                    config_errors.append(info["error"])
+                    continue
 
-        if st.button("Procesar protocolo", disabled=(len(segments) == 0 or len(errors) > 0)):
-            with st.spinner("Procesando cinemática y velocidad angular..."):
-                processed_video_path, meta = process_video_protocol(tmp_path, segments, target_fps, preview_placeholder)
-                results = summarize_segments(segments, meta["sample_period"])
-            store_results(results, processed_video_path)
+                path = info["path"]
+                duration = info["duration"]
+                fps_known = info["fps_known"]
+
+                with st.expander("Ver video"):
+                    st.video(path)
+                st.caption(f"Duración: {duration:.1f} s")
+                if not fps_known:
+                    st.warning(
+                        "No fue posible determinar los FPS. El ROM puede analizarse, "
+                        "pero la velocidad angular no será informada."
+                    )
+
+                c1, c2 = st.columns([2, 1])
+                mov_label = c1.selectbox(
+                    "Movimiento evaluado",
+                    options=list(MOVE_LABEL_TO_KEY.keys()),
+                    key=f"segment_mov_{i}_{uf.name}_{uf.size}",
+                )
+                side_label = c2.selectbox(
+                    "Lado",
+                    options=list(SIDE_LABELS.keys()),
+                    index=1,
+                    key=f"segment_side_{i}_{uf.name}_{uf.size}",
+                )
+
+                use_full = st.checkbox(
+                    "Analizar el video completo",
+                    value=True,
+                    key=f"segment_full_{i}_{uf.name}_{uf.size}",
+                )
+
+                if use_full:
+                    start_sec, end_sec = 0.0, float(duration)
+                else:
+                    start_sec, end_sec = st.slider(
+                        "Intervalo a analizar",
+                        0.0,
+                        float(duration),
+                        (0.0, float(duration)),
+                        step=0.1,
+                        key=f"segment_range_{i}_{uf.name}_{uf.size}",
+                    )
+
+                bp, mov_id = MOVE_LABEL_TO_KEY[mov_label]
+                movement = get_movement(bp, mov_id)
+                st.caption(
+                    f"Vista recomendada: **{movement['view']}**. "
+                    "Procura que la articulación permanezca visible durante todo el movimiento."
+                )
+
+                configs.append({
+                    "name": uf.name,
+                    "path": path,
+                    "duration": duration,
+                    "fps_known": fps_known,
+                    "bp": bp,
+                    "mov_id": mov_id,
+                    "movement": movement,
+                    "mov_label": mov_label,
+                    "side_label": side_label,
+                    "start": float(start_sec),
+                    "end": float(end_sec),
+                })
+
+        can_process = len(configs) > 0 and not config_errors
+
+        if st.button(
+            f"Procesar {len(configs)} video(s)",
+            disabled=not can_process,
+            key="process_segment_batch",
+        ):
+            all_results = []
+            processed_paths = []
+            temp_segment_paths = []
+
+            progress = st.progress(0.0)
+            status = st.empty()
+
+            try:
+                for idx, cfg in enumerate(configs):
+                    status.info(f"Procesando {idx + 1}/{len(configs)}: {cfg['name']}")
+
+                    # Un segmento por video: el usuario ya indicó qué movimiento contiene.
+                    color_hex = SEGMENT_PALETTE[idx % len(SEGMENT_PALETTE)]
+                    segment = {
+                        "idx": 0,
+                        "bp": cfg["bp"],
+                        "mov_id": cfg["mov_id"],
+                        "mov": cfg["movement"],
+                        "side": SIDE_LABELS[cfg["side_label"]],
+                        "side_label": cfg["side_label"],
+                        "label": cfg["mov_label"],
+                        "start": cfg["start"],
+                        "end": cfg["end"],
+                        "color_hex": color_hex,
+                        "color_bgr": hex_to_bgr(color_hex),
+                    }
+
+                    processed_video_path, meta = process_video_protocol(
+                        cfg["path"],
+                        [segment],
+                        target_fps,
+                        preview_placeholder,
+                    )
+                    processed_paths.append(processed_video_path)
+                    one_result = summarize_segments([segment], meta["sample_period"])
+
+                    # Guardar nombre del archivo de origen para identificarlo en resultados.
+                    for r in one_result:
+                        r["source_video"] = cfg["name"]
+                    all_results.extend(one_result)
+
+                    progress.progress((idx + 1) / len(configs))
+
+                store_batch_results(all_results, processed_paths)
+                status.empty()
+                progress.empty()
+
+            except Exception as e:
+                for p in processed_paths:
+                    try:
+                        if p and os.path.exists(p):
+                            os.remove(p)
+                    except Exception:
+                        pass
+                status.empty()
+                progress.empty()
+                st.exception(e)
 
 # ----------------------------------------------------------------------
 if st.session_state.results:
@@ -1191,6 +1423,12 @@ if st.session_state.results:
     if "processed_video_path" in st.session_state:
         st.video(st.session_state.processed_video_path)
 
+    if st.session_state.get("processed_video_paths"):
+        with st.expander("Ver videos procesados"):
+            for i, p in enumerate(st.session_state.processed_video_paths, start=1):
+                st.caption(f"Video procesado {i}")
+                st.video(p)
+
     st.header("3. Evolución temporal por movimiento")
     fig = make_protocol_chart(results)
     st.pyplot(fig)
@@ -1198,6 +1436,7 @@ if st.session_state.results:
 
     st.header("4. Resultados clínicos")
     results_df = pd.DataFrame([{
+        "Video": r.get("source_video", "-"),
         "Movimiento": r["title"],
         "Lado": r["side"],
         "Máximo": fmt_angle(r["max"]),
