@@ -316,9 +316,6 @@ def analyze_frame_segments(frame, landmarker, active_segments, timestamp_ms):
         low_conf = any((getattr(p, "visibility", 1.0) or 1.0) < VISIBILITY_MIN for p in pts_norm)
         color = (60, 70, 226) if low_conf else base_color
 
-        # Etiqueta del movimiento en curso (arriba a la izquierda)
-        put_text(frame, ascii_text(seg["label"]), (int(20 * sc), int((34 + 30 * k) * sc)), 0.7, color, sc)
-
         if movement["mode"] == "vertical":
             vertex, point = pts_px
             angle = angle_from_vertical(vertex, point)
@@ -697,9 +694,8 @@ def analyze_frame_auto(frame, landmarker, groups, timestamp_ms, view_mode, state
             if len(g["buffer"]) > SMOOTH_WINDOW:
                 g["buffer"].pop(0)
             smoothed = sum(g["buffer"]) / len(g["buffer"])
-            name = ascii_text(dir_name(g["bp"], view, 1 if smoothed >= 0 else -1))
             vx, vy = pts_px[1]
-            put_text(frame, f"{abs(smoothed):.0f} {name}", (int(vx + 15 * sc), int(vy + (-15 + 32 * k) * sc)), 0.9, color, sc)
+            put_text(frame, f"{abs(smoothed):.0f}°", (int(vx + 15 * sc), int(vy + (-15 + 32 * k) * sc)), 0.9, color, sc)
         record[g["gid"]] = smoothed
         k += 1
 
