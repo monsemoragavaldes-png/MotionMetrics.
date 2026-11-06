@@ -1,0 +1,8 @@
+# Colócalo en: .streamlit/config.toml (en la misma carpeta de app.py)
+[server]
+maxUploadSize = 1000     # MB por archivo (por defecto son 200)
+maxMessageSize = 1000
+
+# Descomenta SOLO si la app está detrás de un proxy / dominio propio y el error persiste:
+# enableXsrfProtection = false
+# enableCORS = false
