@@ -1002,6 +1002,12 @@ st.caption(
 
 st.header("2. Qué quieres evaluar")
 mode = st.radio("Modo de evaluación", [MODE_AUTO, MODE_SEGMENTS], horizontal=True)
+
+if mode == MODE_AUTO:
+    st.caption("Ideal para analizar varios movimientos dentro de un mismo video.")
+else:
+    st.caption("Ideal para analizar varios videos, indicando manualmente qué movimiento corresponde a cada uno.")
+
 preview_placeholder = st.empty()
 
 
